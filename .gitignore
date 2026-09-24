@@ -1,0 +1,28 @@
+# 构建产物
+dist/
+build/
+*.so
+*.o
+*.whl
+
+# Python 运行时缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# npusim 仿真生成的用例与输出(由 sim/make_case.py 重新生成)
+sim/cases/
+sim/npusim_*/
+**/npusim_out/
+**/output/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# 编辑器/系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
