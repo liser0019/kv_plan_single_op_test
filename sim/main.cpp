@@ -100,7 +100,7 @@ int ReadMetaInt(const char* path, const char* key, int64_t* value) {
   while (std::fgets(line, sizeof(line), f) != nullptr) {
     char name[128];
     int64_t v;
-    if (std::sscanf(line, "%127[^=]=%ld", name, &v) == 1) {
+    if (std::sscanf(line, "%127[^=]=%ld", name, &v) == 2) {
       if (std::strncmp(name, key, sizeof(name)) == 0) {
         *value = v;
         found = 0;

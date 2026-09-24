@@ -277,6 +277,41 @@ def test_npu_symbol_probe():
 
 
 @requires_npu
+def test_meta_rejects_invalid_direct_launch_inputs():
+    """直调按连续内存寻址，且内核属性有 int32 上限。"""
+    import sparse_kv_plan_op  # noqa: F401  注册 torch.ops
+    import torch
+
+    device = "meta"
+    args = [
+        torch.empty(1, dtype=torch.int64, device=device),       # req_ids
+        torch.empty((2, 2), dtype=torch.int32, device=device),  # topk_indices
+        torch.empty(2, dtype=torch.int32, device=device),       # stable_prefix_lens
+        torch.empty(2, dtype=torch.int32, device=device),       # visible_seq_lens
+        torch.empty(2, dtype=torch.int32, device=device),       # token_to_req
+        torch.empty((1, 4), dtype=torch.int32, device=device),  # block_table
+        torch.empty(1, dtype=torch.int32, device=device),       # active_rows
+        torch.empty(2, dtype=torch.int64, device=device),       # last_req_ids
+        torch.empty((2, 4), dtype=torch.int32, device=device),  # slot_to_token
+        torch.empty((2, 4), dtype=torch.int32, device=device),  # lru_slots
+        torch.empty((2, 2), dtype=torch.int32, device=device),  # current_slots
+        torch.empty(2, dtype=torch.int32, device=device),       # miss_count
+        torch.empty((2, 2), dtype=torch.int32, device=device),  # miss_tokens
+        torch.empty((2, 2), dtype=torch.int32, device=device),  # miss_slots
+        torch.empty(1, dtype=torch.int32, device=device),       # compact_workspace (UB path)
+        2, 4, 16, 4, 8,
+    ]
+    args[1] = args[1].t()
+    with pytest.raises(RuntimeError, match="topk_indices must be contiguous"):
+        torch.ops.sparse_kv_plan_op.sparse_kv_plan(*args)
+
+    args[1] = args[1].contiguous()
+    args[-3] = 1 << 31
+    with pytest.raises(RuntimeError, match="exceeds int32 kernel limits"):
+        torch.ops.sparse_kv_plan_op.sparse_kv_plan(*args)
+
+
+@requires_npu
 @pytest.mark.parametrize("case_name", ALL_CASE_NAMES)
 def test_npu_matches_golden(case_name):
     """全量用例 NPU vs golden 精确比对(int32 确定性算法,要求全等)。"""

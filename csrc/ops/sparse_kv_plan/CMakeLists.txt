@@ -10,14 +10,5 @@ register_direct_launch_op(
     "${SPARSE_KV_PLAN_PLUGIN_SRCS}"
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel)
 
-# SIMT VF 内核专用编译选项,与 vllm-ascend 仓
-# csrc/attention/sparse_kv_plan/op_host/CMakeLists.txt 中 add_ops_compile_options
-# 的取值保持一致。这些选项影响 SIMT VF 的 barrier/访存一致性,不得随意删减。
-# COMPILE_OPTIONS 追加在顶层 COMPILE_FLAGS(--npu-arch=... -xasc)之后。
-set_property(SOURCE ${SPARSE_KV_PLAN_KERNEL_SRCS} APPEND PROPERTY
-    COMPILE_OPTIONS
-        "--cce-auto-sync=off"
-        "-Wno-deprecated-declarations"
-        "-mllvm;-cce-vf-remove-membar=false"
-        "-mllvm;-cce-aicore-hoist-movemask=false"
-        "-mllvm;-cce-aicore-dcci-before-kernel-end=false")
+# SIMT VF 专用编译选项由顶层 bisheng custom command 传入。
+# 原先在本子目录设置 SOURCE 属性不会作用到父目录创建的 kernel 目标。

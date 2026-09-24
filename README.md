@@ -42,7 +42,7 @@ kernel 计算逻辑(`ProcessRuntimeRow`、SIMT VF、scan、hash、LRU 重建)与
 | tiling 在 `op_host/sparse_kv_plan_tiling.cpp` 经 GE 框架执行 | 同源逻辑放在 `sparse_kv_plan_launch.h` 纯函数,plugin 直接调用 |
 | `workspace` 形参(GE 分配,从未读取) | 去除;`compactWorkspace` 语义不变 |
 | `aclnnSparseKvPlan` + `EXEC_NPU_CMD` | `torch.ops.sparse_kv_plan_op.sparse_kv_plan`(schema 与 aclnn 原型逐参数对应,8 个被写张量带 `(a!)..(h!)` 标注) |
-| 编译选项 `--cce-auto-sync=off` 等 | 在算子 CMakeLists 中原样保留(影响 SIMT VF 一致性,勿删) |
+| 编译选项 `--cce-auto-sync=off` 等 | 由顶层 CMakeLists 的 bisheng 命令传入(影响 SIMT VF 一致性,勿删) |
 
 ## 单算子测试设计(tests/)
 
@@ -69,7 +69,7 @@ kernel 计算逻辑(`ProcessRuntimeRow`、SIMT VF、scan、hash、LRU 重建)与
 
 ```bash
 # 无 NPU(仅 golden/MTP CPU 层)
-bash tests/run.sh  # 或 CPU_ONLY=1 bash tests/run.sh
+CPU_ONLY=1 bash tests/run.sh
 
 # ---- NPU 机器完整流程 ----
 # 0) 环境:CANN 已 source;python 环境装好 torch + 匹配版本 torch_npu + pytest + numpy
@@ -131,7 +131,7 @@ MemFabric Host DVA 注册是唯一缺口。
 - `cmake/ascend.cmake` 的 bisheng 发现路径(可用 `-DBISHENG_CXX=` 覆盖)
 - `sim/build_sim.sh` 的 bbit 编译选项(不同 CANN 版本叫法可能不同)
 - `sim/main.cpp` 假定 npusim 接管标准 aclrt API
-- 顶层 CMakeLists 的 bisheng/g++ 双编译器切换(direct launch 样例的既定做法)
+- 顶层 CMakeLists 的 bisheng custom command 与 g++ 链接流程
 - `KERNEL_TASK_TYPE_DEFAULT` 宏兜底(若工具链已定义则用原生,否则置空,
   直调下任务类型由启动配置决定)
 

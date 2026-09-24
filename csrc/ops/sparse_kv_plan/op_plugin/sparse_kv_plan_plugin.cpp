@@ -18,7 +18,9 @@
  *   block_size    KV block 大小(token/block)
  *   host_num_blocks host 侧 KV 缓存物理 block 数(physical block 合法上界)
  */
+#include <cstddef>
 #include <cstring>
+#include <limits>
 
 #include <torch/all.h>
 #include <torch/library.h>
@@ -41,10 +43,19 @@ void CheckSparseKvPlanInputs(const at::Tensor& reqIds, const at::Tensor& topkInd
                              const at::Tensor& slotToToken, const at::Tensor& lruSlots,
                              const at::Tensor& currentSlots, const at::Tensor& missCount,
                              const at::Tensor& missTokens, const at::Tensor& missSlots,
-                             const at::Tensor& compactWorkspace, int64_t topk, int64_t capacity) {
+                             const at::Tensor& compactWorkspace, int64_t topk, int64_t capacity,
+                             int64_t maxToken, int64_t blockSize, int64_t hostNumBlocks, bool requireNpu) {
+  TORCH_CHECK(topk > 0 && capacity > 0 && maxToken > 0 && blockSize > 0 && hostNumBlocks > 0,
+              "topk/capacity/max_token/block_size/host_num_blocks must be positive");
+  TORCH_CHECK(topk <= std::numeric_limits<int32_t>::max() / 2 &&
+                  capacity <= std::numeric_limits<int32_t>::max() &&
+                  maxToken <= std::numeric_limits<int32_t>::max() &&
+                  blockSize <= std::numeric_limits<int32_t>::max(),
+              "SparseKvPlan shape or attribute exceeds int32 kernel limits");
   TORCH_CHECK(reqIds.dim() == 1 && reqIds.scalar_type() == at::kLong, "req_ids must be 1-D int64");
   TORCH_CHECK(topkIndices.dim() == 2 && topkIndices.scalar_type() == at::kInt, "topk_indices must be 2-D int32");
   const int64_t maxRows = topkIndices.size(0);
+  TORCH_CHECK(maxRows > 0 && reqIds.numel() > 0, "max_rows and max_requests must be positive");
   TORCH_CHECK(topkIndices.size(1) == topk, "topk_indices.size(1) must equal topk attr, got ",
               topkIndices.size(1), " vs ", topk);
   TORCH_CHECK(stablePrefixLens.numel() == maxRows && visibleSeqLens.numel() == maxRows &&
@@ -55,6 +66,7 @@ void CheckSparseKvPlanInputs(const at::Tensor& reqIds, const at::Tensor& topkInd
               "row metadata must be int32");
   TORCH_CHECK(blockTable.dim() == 2 && blockTable.scalar_type() == at::kInt, "block_table must be 2-D int32");
   TORCH_CHECK(blockTable.size(0) == reqIds.size(0), "req_ids and block_table row counts must match");
+  TORCH_CHECK(blockTable.size(1) > 0, "max_num_blocks must be positive");
   TORCH_CHECK(activeRows.numel() == 1 && activeRows.scalar_type() == at::kInt,
               "active_rows must be a scalar int32 tensor");
   TORCH_CHECK(lastReqIds.dim() == 1 && lastReqIds.scalar_type() == at::kLong && lastReqIds.numel() == maxRows,
@@ -76,13 +88,31 @@ void CheckSparseKvPlanInputs(const at::Tensor& reqIds, const at::Tensor& topkInd
               "miss_slots must be int32 [max_rows, topk]");
   TORCH_CHECK(compactWorkspace.scalar_type() == at::kInt && compactWorkspace.dim() == 1,
               "compact_workspace must be 1-D int32");
+  const at::Tensor* tensors[] = {&reqIds,          &topkIndices,  &stablePrefixLens, &visibleSeqLens,
+                                 &tokenToReq,      &blockTable,   &activeRows,       &lastReqIds,
+                                 &slotToToken,     &lruSlots,     &currentSlots,     &missCount,
+                                 &missTokens,      &missSlots,    &compactWorkspace};
+  const char* names[] = {"req_ids",          "topk_indices", "stable_prefix_lens", "visible_seq_lens",
+                         "token_to_req",     "block_table",  "active_rows",       "last_req_ids",
+                         "slot_to_token",    "lru_slots",    "current_slots",     "miss_count",
+                         "miss_tokens",      "miss_slots",   "compact_workspace"};
+  if (requireNpu) {
+    TORCH_CHECK(reqIds.device().type() == c10::DeviceType::PrivateUse1, "req_ids must be on NPU");
+  }
+  for (std::size_t i = 0; i < sizeof(tensors) / sizeof(tensors[0]); ++i) {
+    TORCH_CHECK(tensors[i]->is_contiguous(), names[i], " must be contiguous");
+    if (requireNpu) {
+      TORCH_CHECK(tensors[i]->device() == reqIds.device(), names[i], " must be on the same NPU as req_ids");
+    }
+  }
   // workspace 容量要求:UB 快路径只需占位 1 个元素;GM 路径需 max_rows * rowElements。
   const uint64_t rowElements = SparseKvPlanRowElements(topk, capacity);
+  TORCH_CHECK(rowElements <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max() / maxRows),
+              "compact_workspace element count overflows int64");
   const int64_t required =
       rowElements <= sparse_kv_plan::PLAN_ROW_UB_LIMIT_ELEMENTS ? 1 : static_cast<int64_t>(maxRows * rowElements);
   TORCH_CHECK(compactWorkspace.numel() >= required, "compact_workspace requires >= ", required,
               " elements for this topk/capacity, got ", compactWorkspace.numel());
-  TORCH_CHECK(topk > 0 && capacity > 0, "topk and capacity must be positive");
 }
 
 void sparse_kv_plan_meta(const at::Tensor& reqIds, const at::Tensor& topkIndices,
@@ -94,9 +124,7 @@ void sparse_kv_plan_meta(const at::Tensor& reqIds, const at::Tensor& topkIndices
                          int64_t capacity, int64_t maxToken, int64_t blockSize, int64_t hostNumBlocks) {
   CheckSparseKvPlanInputs(reqIds, topkIndices, stablePrefixLens, visibleSeqLens, tokenToReq, blockTable, activeRows,
                           lastReqIds, slotToToken, lruSlots, currentSlots, missCount, missTokens, missSlots,
-                          compactWorkspace, topk, capacity);
-  TORCH_CHECK(maxToken > 0 && blockSize > 0 && hostNumBlocks > 0,
-              "max_token/block_size/host_num_blocks must be positive");
+                          compactWorkspace, topk, capacity, maxToken, blockSize, hostNumBlocks, false);
 }
 
 void sparse_kv_plan_npu(const at::Tensor& reqIds, const at::Tensor& topkIndices,
@@ -106,12 +134,10 @@ void sparse_kv_plan_npu(const at::Tensor& reqIds, const at::Tensor& topkIndices,
                         const at::Tensor& currentSlots, const at::Tensor& missCount, const at::Tensor& missTokens,
                         const at::Tensor& missSlots, const at::Tensor& compactWorkspace, int64_t topk,
                         int64_t capacity, int64_t maxToken, int64_t blockSize, int64_t hostNumBlocks) {
-  const c10::OptionalDeviceGuard guard(reqIds.device());
   CheckSparseKvPlanInputs(reqIds, topkIndices, stablePrefixLens, visibleSeqLens, tokenToReq, blockTable, activeRows,
                          lastReqIds, slotToToken, lruSlots, currentSlots, missCount, missTokens, missSlots,
-                         compactWorkspace, topk, capacity);
-  TORCH_CHECK(maxToken > 0 && blockSize > 0 && hostNumBlocks > 0,
-              "max_token/block_size/host_num_blocks must be positive");
+                         compactWorkspace, topk, capacity, maxToken, blockSize, hostNumBlocks, true);
+  const c10::OptionalDeviceGuard guard(reqIds.device());
 
   const int64_t maxRows = topkIndices.size(0);
   const int64_t maxRequests = reqIds.size(0);
