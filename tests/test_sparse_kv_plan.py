@@ -20,7 +20,7 @@
 - UB / GM workspace 路径      → l2_ub_boundary_exact / l2_gm_workspace
 - 越界 LRU 项                 → l2_lru_oob_entries
 - capacity=1 / 单行           → l2_capacity_one / l0_single_row
-- stablePrefix 全失效         → l2_stable_prefix_full
+- stablePrefix 全失效         → l2_stable_prefix_zero
 """
 
 from __future__ import annotations
@@ -198,6 +198,35 @@ def test_golden_active_rows_zero_touches_nothing():
     np.testing.assert_array_equal(out["miss_tokens"], np.full_like(out["miss_tokens"], -1))
     np.testing.assert_array_equal(out["miss_slots"], np.full_like(out["miss_slots"], -1))
     assert out["num_rows"] == 0
+
+
+def test_warm_case_really_hits_previous_resident():
+    """warm 用例必须保持请求身份，并产生至少一个历史 resident 命中。"""
+    case = build_case("l1_warm_two_steps")
+    for row, request in enumerate(case["token_to_req"]):
+        if request >= 0:
+            assert case["last_req_ids"][row] == case["req_ids"][request]
+    out = golden_sparse_kv_plan(case)
+    assigned = sum(int(out["miss_count"][row]) for row in range(out["num_rows"]))
+    resolved = int((out["current_slots"][:out["num_rows"]] >= 0).sum())
+    assert resolved > assigned, "没有覆盖历史 resident 命中"
+
+
+def test_l2_cases_reach_intended_branches():
+    """边界用例不能在目标分支执行前被 request reset 掩盖。"""
+    lru_case = build_case("l2_lru_oob_entries")
+    assert ((lru_case["lru_slots"] < 0) | (lru_case["lru_slots"] >= lru_case["capacity"])).any()
+    for row, request in enumerate(lru_case["token_to_req"]):
+        if request >= 0:
+            assert lru_case["last_req_ids"][row] == lru_case["req_ids"][request]
+
+    stable_case = build_case("l2_stable_prefix_zero")
+    assert (stable_case["slot_to_token"] >= 0).any()
+    assert (stable_case["stable_prefix_lens"] == 0).all()
+    out = golden_sparse_kv_plan(stable_case)
+    for row in range(out["num_rows"]):
+        assigned = set(out["miss_slots"][row, : int(out["miss_count"][row])].tolist())
+        assert set(out["current_slots"][row][out["current_slots"][row] >= 0].tolist()) <= assigned
 
 
 # ===========================================================================

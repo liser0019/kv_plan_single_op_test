@@ -46,7 +46,7 @@ kernel 计算逻辑(`ProcessRuntimeRow`、SIMT VF、scan、hash、LRU 重建)与
 
 ## 单算子测试设计(tests/)
 
-三层结构,前两层**无 NPU 可跑**(当前交付机器已验证:37 项全过),
+三层结构,前两层**无 NPU 可跑**(当前交付机器已验证:40 项全过),
 第三层在 NPU 机器上跑:
 
 | 层 | 文件 | 内容 |
@@ -59,11 +59,11 @@ kernel 计算逻辑(`ProcessRuntimeRow`、SIMT VF、scan、hash、LRU 重建)与
 ### 用例分级
 
 - **L0**:l0_basic(T=2,C=4)、l0_single_row
-- **L1**:l1_small(T=32)、l1_typical(T=64,C=128,UB 路径)、l1_warm_two_steps(warm 状态续用)
+- **L1**:l1_small(T=32)、l1_typical(T=64,C=128,UB 路径)、l1_warm_two_steps(warm 状态续用与历史 resident 命中)
 - **L2**:activeRows=0/越界截断、重复 token、全非法 TopK、C=1、
   **UB/GM workspace 精确边界**(T=2048,C=7168 恰好 112 KiB 走 UB;
   C=7169 越界走 GM)、越界 LRU 项、stablePrefix 全失效、请求切换 reset、
-  miss > evictable(未分配保持 -1)
+  miss > evictable(未分配保持 -1);测试同时检查 warm/越界 LRU/全失效用例不会被请求 reset 掩盖
 
 ### 运行
 
@@ -104,7 +104,7 @@ bash sim/run_sim.sh --include-heavy  # 含 GM workspace 大用例
    回滚语义。真实集成里 `stable_prefix_lens = key_len - query_len`
    (`sfa_kv_offload.py`),MTP 一步 query 含 draft token,故 stable 恰为
    已提交前缀。
-2. **投机可见性**:`visible_seq_lens[row] = 已提交 + draft`,TopK 允许选中
+2. **投机可见性**:`visible_seq_lens[row] = 已提交 + 1 + draft`,TopK 允许选中
    投机区 token(它们可作为 miss 正常分配驻留)。
 3. **多 token 行展开**:MTP 一步每请求 `(1 + draft_tokens)` 行,
    `token_to_req` 映射回请求,与 fused_overlap_mtp 的 flatten 模式一致。
@@ -116,7 +116,7 @@ bash sim/run_sim.sh --include-heavy  # 含 GM workspace 大用例
 `tests/test_mtp_speculative.py` 实现了以上全部,并逐步断言 MTP 不变量:
 **投机 token(≥ stablePrefix)的驻留只能来自本步 miss 分配,绝不能命中
 历史 resident**;被重排的行不允许出现任何历史 resident 命中。CPU 侧先以
-golden 验证语义,NPU 侧逐步与 golden 全等比对(状态跨步传递)。
+golden 验证语义,NPU 侧逐步与 golden 全等比对(直接续用 NPU 写出的跨步状态)。
 
 若要进一步逼近端到端:接上 vLLM 的 MTP proposer(`llm_base_proposer.py`)
 跑真实 workload 时,本工程的状态张量布局(`SimtLruState`)与 vllm-ascend

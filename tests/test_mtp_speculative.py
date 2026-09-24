@@ -6,7 +6,7 @@
 SparseKvPlan 的 MTP 语义完全由输入表达,不需要真的跑模型:
 - stable_prefix_lens[row] = 该行请求的"已提交前缀长度"
   (真实集成:sfa_kv_offload.py 中 actual_seq_lens_key - query_len);
-- visible_seq_lens[row]  = 投机可见长度 = 已提交 + draft_tokens;
+- visible_seq_lens[row]  = 投机可见长度 = 已提交 + 1 个目标 token + draft_tokens;
 - MTP 一步 = 每请求 (1 + draft_tokens) 行(token batch 展开,
   token_to_req 把行映射回请求,与 fused_overlap_mtp 的 flatten 一致);
 - kernel 侧 stablePrefix 失效逻辑即投机回滚语义:
@@ -46,7 +46,7 @@ class MTPScenario:
 
     每步:
       - 每请求展开 q_len = 1 + draft_tokens 行;
-      - stable[row] = context[req](已提交),visible[row] = context[req] + draft;
+      - stable[row] = context[req](已提交),visible[row] = context[req] + q_len;
       - topk 混合稳定区与投机区 token;
       - 每 3 步做一次行重排(模拟真实 serving 的行压缩/重排,触发 reset 分支)。
     """
@@ -80,7 +80,7 @@ class MTPScenario:
 
     def step_case(self, step: int) -> dict:
         q_len = 1 + self.draft_tokens
-        visible = self.context[self.row_owner] + self.draft_tokens
+        visible = self.context[self.row_owner] + q_len
         visible = np.minimum(visible, self.max_token).astype(np.int32)
         stable = np.minimum(self.context[self.row_owner], self.max_token).astype(np.int32)
 
@@ -168,6 +168,15 @@ def test_mtp_scenario_cpu():
     assert total_miss > 0
 
 
+def test_mtp_visible_length_covers_full_query():
+    scenario = MTPScenario(seed=42)
+    case = scenario.step_case(0)
+    np.testing.assert_array_equal(
+        case["visible_seq_lens"] - case["stable_prefix_lens"],
+        np.full(scenario.max_rows, 1 + scenario.draft_tokens, dtype=np.int32),
+    )
+
+
 def test_mtp_scenario_accept_and_rollback():
     """接受/回滚交替:接受步之后 stable 前移,历史投机 token 若仍在投机区
     则下一步不能作为 resident 命中(assert_mtp_semantics 逐步把关)。"""
@@ -212,9 +221,11 @@ def test_mtp_scenario_npu_matches_golden():
     for step in range(scenario.num_steps):
         case = scenario.step_case(step)
         expected = golden_sparse_kv_plan(case)
-        state.last_req_ids.copy_(to_npu(case["last_req_ids"]))
-        state.slot_to_token.copy_(to_npu(case["slot_to_token"]))
-        state.lru_slots.copy_(to_npu(case["lru_slots"]))
+        # 仅初始化第一步；后续直接使用上一轮 NPU kernel 写出的持久状态。
+        if step == 0:
+            state.last_req_ids.copy_(to_npu(case["last_req_ids"]))
+            state.slot_to_token.copy_(to_npu(case["slot_to_token"]))
+            state.lru_slots.copy_(to_npu(case["lru_slots"]))
         state.active_rows.copy_(to_npu(np.atleast_1d(np.int32(case["active_rows"]))))
         sparse_kv_plan_op.sparse_kv_plan(
             req_ids=to_npu(case["req_ids"]),
@@ -238,10 +249,11 @@ def test_mtp_scenario_npu_matches_golden():
             "slot_to_token": state.slot_to_token.cpu().numpy(),
             "lru_slots": state.lru_slots.cpu().numpy(),
             "last_req_ids": state.last_req_ids.cpu().numpy(),
+            "num_rows": scenario.max_rows,
         }
         for key in actual:
             np.testing.assert_array_equal(actual[key], expected[key], err_msg=f"mtp step{step}:{key}")
-        assert_mtp_semantics(case, expected)
+        assert_mtp_semantics(case, actual)
         scenario.commit(expected, step)
 
 

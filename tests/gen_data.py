@@ -104,6 +104,11 @@ def make_case(name: str, seed: int, *, warm_steps: int = 0, **params) -> dict:
         state["lru_slots"] = case.pop("_lru_init").copy()
 
     case.update(state)
+    if params.get("lru_with_oob"):
+        # 保持请求身份不变，否则阶段 2 会重置 LRU，越界项根本进不了阶段 4。
+        for row, request in enumerate(case["token_to_req"]):
+            if 0 <= request < num_reqs:
+                case["last_req_ids"][row] = case["req_ids"][request]
     case.update(
         topk=topk,
         capacity=capacity,
@@ -122,6 +127,11 @@ def make_case(name: str, seed: int, *, warm_steps: int = 0, **params) -> dict:
             seed=seed * 100 + step + 1,
             valid_ratio=params.get("valid_ratio", 0.85),
         )
+        # warm 与被测调用必须属于同一批请求，行映射和物理 block 表也保持一致。
+        # 否则被测调用会先 reset，无法检验 resident 命中及投机后缀失效。
+        warm["req_ids"] = case["req_ids"].copy()
+        warm["token_to_req"] = case["token_to_req"].copy()
+        warm["block_table"] = case["block_table"].copy()
         warm.update(state)
         warm.update(
             topk=topk,
@@ -199,10 +209,10 @@ CASE_PARAMS: dict[str, dict] = {
         num_reqs=1, max_rows=2, topk=1, capacity=1, max_token=32,
         block_size=8, host_num_blocks=8, max_num_blocks=4,
     ),
-    "l2_stable_prefix_full": dict(
+    "l2_stable_prefix_zero": dict(
         num_reqs=2, max_rows=4, topk=8, capacity=16, max_token=128,
         block_size=16, host_num_blocks=32, max_num_blocks=8,
-        warm_steps=1, stable_override=10 ** 9,  # clamp 到 max_token → 全部失效
+        warm_steps=1, stable_override=0,  # token >= 0 的历史驻留全部失效
     ),
     "l2_req_change_reset": dict(
         num_reqs=3, max_rows=6, topk=8, capacity=16, max_token=256,
