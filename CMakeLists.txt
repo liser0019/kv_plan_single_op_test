@@ -105,7 +105,7 @@ target_include_directories(all_plugins_obj SYSTEM PRIVATE
     ${TORCH_INCLUDE_DIRS}
     ${TORCH_NPU_INCLUDE_DIRS}
     ${CANN_INCLUDE_DIRS}
-    ${PYTHON_INCLUDE_DIRS}
+    ${Python3_INCLUDE_DIRS}
     ${OP_INCLUDE_DIRS})
 
 # ---- 合并为 _C.so ----
@@ -118,7 +118,7 @@ set_target_properties(_C PROPERTIES PREFIX "" OUTPUT_NAME "_C" SUFFIX ".so")
 target_include_directories(_C SYSTEM PRIVATE
     ${TORCH_INCLUDE_DIRS}
     ${CANN_INCLUDE_DIRS}
-    ${PYTHON_INCLUDE_DIRS}
+    ${Python3_INCLUDE_DIRS}
     ${OP_INCLUDE_DIRS})
 target_link_directories(_C PRIVATE
     ${TORCH_LIB_DIR}
@@ -130,4 +130,7 @@ target_link_libraries(_C PRIVATE
     torch_python
     c10
     torch_npu
-    ascendcl)
+    ascendcl
+    tiling_api
+    platform
+    "${ASCEND_CANN_PACKAGE_HOME}/aarch64-linux/lib64/libascendc_runtime.a")

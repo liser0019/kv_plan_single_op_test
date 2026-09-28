@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
               row_elements * sizeof(int32_t) <= sparse_kv_plan::PLAN_ROW_UB_LIMIT_BYTES ? "UB" : "GM");
   launch_sparse_kv_plan(b_req.dev, b_topk.dev, b_stable.dev, b_visible.dev, b_t2r.dev, b_bt.dev, b_active.dev,
                         b_last.dev, b_stt.dev, b_lru.dev, b_cs.dev, b_mc.dev, b_mt.dev, b_ms.dev, b_ws.dev,
-                        b_tiling.dev, block_dim, stream);
+                        b_tiling.dev, block_dim, tiling.localMemoryBytes, stream);
   if (aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
     std::fprintf(stderr, "aclrtSynchronizeStream 失败\n");
     return 1;

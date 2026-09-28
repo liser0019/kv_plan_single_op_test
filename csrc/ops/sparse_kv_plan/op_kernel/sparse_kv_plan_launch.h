@@ -103,12 +103,14 @@ extern "C" {
 uint32_t calc_sparse_kv_plan_block_dim(void);
 
 // 直调入口:grid = blockDim 个 AIV block,tiling 为设备侧 tiling 结构缓冲。
+// dynUBufSize 由 host 的 tiling.localMemoryBytes 提供,保留动态 UB。
 // 参数顺序与 kernel 入口一致(去掉 GE 框架专用的 workspace 形参)。
 void launch_sparse_kv_plan(GM_ADDR reqIds, GM_ADDR topkIndices, GM_ADDR stablePrefixLens,
                            GM_ADDR visibleSeqLens, GM_ADDR tokenToReq, GM_ADDR blockTable,
                            GM_ADDR activeRows, GM_ADDR lastReqIds, GM_ADDR slotToToken, GM_ADDR lruSlots,
                            GM_ADDR currentSlots, GM_ADDR missCount, GM_ADDR missTokens, GM_ADDR missSlots,
-                           GM_ADDR compactWorkspace, GM_ADDR tiling, uint32_t blockDim, void* stream);
+                           GM_ADDR compactWorkspace, GM_ADDR tiling, uint32_t blockDim,
+                           uint32_t dynUBufSize, void* stream);
 
 #if defined(__cplusplus) && !defined(SPARSE_KV_PLAN_LAUNCH_DECL_ONLY)
 }

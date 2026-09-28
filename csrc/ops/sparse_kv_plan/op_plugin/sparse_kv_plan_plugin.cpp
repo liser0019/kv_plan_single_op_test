@@ -156,7 +156,7 @@ void sparse_kv_plan_npu(const at::Tensor& reqIds, const at::Tensor& topkIndices,
   const uint32_t blockDim = calc_sparse_kv_plan_block_dim();
   auto stream = c10_npu::getCurrentNPUStream().stream(false);
 
-  auto launch = [&]() -> int {
+  auto launch = [=]() -> int {
     launch_sparse_kv_plan(
         const_cast<GM_ADDR>(reqIds.data_ptr()), const_cast<GM_ADDR>(topkIndices.data_ptr()),
         const_cast<GM_ADDR>(stablePrefixLens.data_ptr()), const_cast<GM_ADDR>(visibleSeqLens.data_ptr()),
@@ -166,7 +166,7 @@ void sparse_kv_plan_npu(const at::Tensor& reqIds, const at::Tensor& topkIndices,
         const_cast<GM_ADDR>(currentSlots.data_ptr()), const_cast<GM_ADDR>(missCount.data_ptr()),
         const_cast<GM_ADDR>(missTokens.data_ptr()), const_cast<GM_ADDR>(missSlots.data_ptr()),
         const_cast<GM_ADDR>(compactWorkspace.data_ptr()), const_cast<GM_ADDR>(tilingDev.data_ptr()), blockDim,
-        reinterpret_cast<void*>(stream));
+        tiling.localMemoryBytes, reinterpret_cast<void*>(stream));
     return 0;
   };
   // RunOpApi 仅提供算子名标签(直调不真正走 aclnn)。

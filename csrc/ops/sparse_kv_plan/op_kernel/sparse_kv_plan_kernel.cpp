@@ -440,7 +440,7 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(PLAN_THREADS) inline void SparseKvPlanRuntim
  * - 去掉 workspace 形参(原 kernel 从未读取);
  * - tiling 从 device 侧缓冲显式加载结构体(等价于原 GET_TILING_DATA_WITH_STRUCT)。
  */
-extern "C" __global__ __aicore__ void sparse_kv_plan(GM_ADDR reqIds, GM_ADDR topkIndices, GM_ADDR stablePrefixLens,
+extern "C" __global__ __aicore__ void sparse_kv_plan_kernel(GM_ADDR reqIds, GM_ADDR topkIndices, GM_ADDR stablePrefixLens,
                                                      GM_ADDR visibleSeqLens, GM_ADDR tokenToReq, GM_ADDR blockTable,
                                                      GM_ADDR activeRows, GM_ADDR lastReqIds, GM_ADDR slotToToken,
                                                      GM_ADDR lruSlots, GM_ADDR currentSlots, GM_ADDR missCount,
@@ -448,7 +448,20 @@ extern "C" __global__ __aicore__ void sparse_kv_plan(GM_ADDR reqIds, GM_ADDR top
                                                      GM_ADDR tiling) {
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
   AscendC::InitSocState();
-  const SparseKvPlanTilingData tilingData = *reinterpret_cast<const __gm__ SparseKvPlanTilingData*>(tiling);
+  const __gm__ SparseKvPlanTilingData* tilingGm =
+      reinterpret_cast<const __gm__ SparseKvPlanTilingData*>(tiling);
+  SparseKvPlanTilingData tilingData;
+  tilingData.hashCapacity = tilingGm->hashCapacity;
+  tilingData.workspaceRowElements = tilingGm->workspaceRowElements;
+  tilingData.maxRows = tilingGm->maxRows;
+  tilingData.topk = tilingGm->topk;
+  tilingData.capacity = tilingGm->capacity;
+  tilingData.maxToken = tilingGm->maxToken;
+  tilingData.maxRequests = tilingGm->maxRequests;
+  tilingData.maxNumBlocks = tilingGm->maxNumBlocks;
+  tilingData.hostNumBlocks = tilingGm->hostNumBlocks;
+  tilingData.blockSize = tilingGm->blockSize;
+  tilingData.localMemoryBytes = tilingGm->localMemoryBytes;
   const int32_t requestedRows = *reinterpret_cast<__gm__ int32_t*>(activeRows);
   const int64_t numRows = requestedRows > 0 && requestedRows < tilingData.maxRows
                               ? requestedRows
@@ -498,9 +511,9 @@ extern "C" void launch_sparse_kv_plan(GM_ADDR reqIds, GM_ADDR topkIndices, GM_AD
                                       GM_ADDR visibleSeqLens, GM_ADDR tokenToReq, GM_ADDR blockTable,
                                       GM_ADDR activeRows, GM_ADDR lastReqIds, GM_ADDR slotToToken, GM_ADDR lruSlots,
                                       GM_ADDR currentSlots, GM_ADDR missCount, GM_ADDR missTokens, GM_ADDR missSlots,
-                                      GM_ADDR compactWorkspace, GM_ADDR tiling, uint32_t blockDim, void* stream) {
-  sparse_kv_plan<<<blockDim, nullptr, stream>>>(reqIds, topkIndices, stablePrefixLens, visibleSeqLens, tokenToReq,
-                                                blockTable, activeRows, lastReqIds, slotToToken, lruSlots,
-                                                currentSlots, missCount, missTokens, missSlots, compactWorkspace,
-                                                tiling);
+                                      GM_ADDR compactWorkspace, GM_ADDR tiling, uint32_t blockDim,
+                                      uint32_t dynUBufSize, void* stream) {
+  sparse_kv_plan_kernel<<<blockDim, dynUBufSize, stream>>>(
+      reqIds, topkIndices, stablePrefixLens, visibleSeqLens, tokenToReq, blockTable, activeRows, lastReqIds,
+      slotToToken, lruSlots, currentSlots, missCount, missTokens, missSlots, compactWorkspace, tiling);
 }
