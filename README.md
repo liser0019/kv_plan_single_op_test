@@ -27,7 +27,9 @@ sparse_kv_plan_op/
 │       │   └── sparse_kv_plan_kernel.cpp           # 内核(只搬不改)+ 直调入口
 │       └── op_plugin/
 │           └── sparse_kv_plan_plugin.cpp           # torch.library 注册 + Meta + NPU impl
+│   └── ops/old_lru_compact/                       # MemFabric_Hybrid 旧 AIV LRU 核及直调适配
 ├── tests/                                          # 单算子测试(三层,见下)
+├── bench/compare_old_new.py                        # 两版规划核生产尺寸对比
 └── sim/                                            # npusim 无 NPU 精度仿真路径
 ```
 
@@ -93,6 +95,38 @@ bash sim/run_sim.sh --include-heavy  # 含 GM workspace 大用例
 > 构建后 `_C.so` 同时解回工程源码包目录:从工程根目录直接 `import
 > sparse_kv_plan_op` 用的是本地最新构建,不会被 site-packages 里的旧包
 > 遮蔽(也不会反向遮蔽)。若怀疑跑的不是最新代码,重跑第 1 步即可恢复。
+
+## 旧 AIV LRU 算子与新版 Plan 对比
+
+`csrc/ops/old_lru_compact/op_kernel/acc_offload_lru_compact.*` 复制自
+`old_aiv_version/memfabric-hybrid_kvoffload/src/acc_offload/csrc/operators/`，
+保留旧版 LRU 计算循环；直调启动在 950 上按原有 13 个 UB buffer 大小传入
+动态 UB。生产配置 `topk=2048, capacity=4096` 使用 118848 字节，host
+校验其不超过 120 KiB。旧核固定 8 个 AIV block，需约
+`2 * 8 * max_token * sizeof(int32)` 的 mark/pos 工作区（256k token 时 16 MiB）。
+
+旧核只读取 `req_ids/topk_indices/stable_prefix_lens`，且每行直接对应同号
+request；新版还通过 `visible_seq_lens/token_to_req/block_table` 检查来源 token。
+`tests/old_lru_cases.py` 为两者构造相同且完全合法的来源，保证比较的
+`current_slots`、miss 输出、LRU 持久状态有相同语义。测试覆盖冷状态、
+75% 历史命中、全命中，含 `request=32, topk=2048, capacity=4096,
+max_token=262144`。逐项与独立 CPU golden 比较；若不一致，基准脚本停止。
+
+```bash
+# Ascend 950 服务器，先按上节编译安装
+python3 -m pytest tests/test_old_lru_compact.py -v -s
+python3 bench/compare_old_new.py --warmup 10 --repeat 50 --json bench_result.json
+```
+
+脚本给出冷、75% 命中、全命中三种场景的 NPU event 耗时及
+`call + synchronize` 主机耗时（p50、p95、最小值）和新版加速比。
+每轮计时前在 NPU 上恢复相同的初始 LRU 状态并同步；状态恢复、数据生成、
+CPU golden 和结果比对不计时。event 包含实际算子调用排入同一 stream 的
+操作；新版的 tiling H2D 若排在同一 stream，也会计入 event。它是算子
+API 时延，不能直接
+当作纯 kernel 指令耗时。旧库的地址生成和 sparse copy 不在此基准范围内。
+
+本机若没有 NPU，CPU 用例可以运行，但不能生成真实的性能数字。
 
 ## 开 MTP 投机推理的单算子测试 —— 可以,而且不需要模型
 

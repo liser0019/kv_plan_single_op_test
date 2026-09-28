@@ -33,6 +33,8 @@ except ImportError as e:  # pragma: no cover
 __all__ = [
     "sparse_kv_plan",
     "SimtLruState",
+    "old_lru_compact",
+    "OldLruState",
     "plan_hash_capacity",
     "plan_workspace_elements",
     "make_compact_workspace",
@@ -138,4 +140,49 @@ def sparse_kv_plan(
         max_token,
         block_size,
         host_num_blocks,
+    )
+
+
+class OldLruState(NamedTuple):
+    """MemFabric_Hybrid 旧 AIV LRU 核的持久状态与输出缓冲。"""
+
+    last_req_ids: torch.Tensor
+    slot_to_token: torch.Tensor
+    lru_slots: torch.Tensor
+    current_slots: torch.Tensor
+    miss_count: torch.Tensor
+    miss_tokens: torch.Tensor
+    miss_slots: torch.Tensor
+    token_mark: torch.Tensor
+    token_pos: torch.Tensor
+    epochs: torch.Tensor
+
+    @classmethod
+    def create(cls, rows: int, topk: int, capacity: int, max_token: int, device) -> "OldLruState":
+        return cls(
+            last_req_ids=torch.full((rows,), -1, dtype=torch.int64, device=device),
+            slot_to_token=torch.full((rows, capacity), -1, dtype=torch.int32, device=device),
+            lru_slots=torch.arange(capacity, dtype=torch.int32, device=device).repeat(rows, 1),
+            current_slots=torch.full((rows, topk), -1, dtype=torch.int32, device=device),
+            miss_count=torch.zeros(rows, dtype=torch.int32, device=device),
+            miss_tokens=torch.full((rows, topk), -1, dtype=torch.int32, device=device),
+            miss_slots=torch.full((rows, topk), -1, dtype=torch.int32, device=device),
+            token_mark=torch.zeros((8, max_token), dtype=torch.int32, device=device),
+            token_pos=torch.zeros((8, max_token), dtype=torch.int32, device=device),
+            epochs=torch.zeros(8, dtype=torch.int32, device=device),
+        )
+
+
+def old_lru_compact(
+    *, req_ids: torch.Tensor, topk_indices: torch.Tensor,
+    stable_prefix_lens: torch.Tensor, state: OldLruState,
+    max_token: int,
+) -> None:
+    """调用原始 AIV LRU compact 算法；行号直接对应 request 号。"""
+    return torch.ops.sparse_kv_plan_op.old_lru_compact(
+        req_ids, topk_indices, stable_prefix_lens,
+        state.last_req_ids, state.slot_to_token, state.lru_slots,
+        state.current_slots, state.miss_count, state.miss_tokens,
+        state.miss_slots, state.token_mark, state.token_pos,
+        state.epochs, max_token,
     )

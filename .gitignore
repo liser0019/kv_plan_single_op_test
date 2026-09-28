@@ -9,6 +9,7 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
+bench_result*.json
 
 # npusim 仿真生成的用例与输出(由 sim/make_case.py 重新生成)
 sim/cases/
