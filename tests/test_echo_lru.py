@@ -155,9 +155,10 @@ def _actual(state):
 
 
 @requires_npu
+@pytest.mark.parametrize("variant", ["original", "skip_sort"])
 @pytest.mark.parametrize("shape", [(8, 8, 16, 128), (32, 2048, 4096, 256*1024)])
 @pytest.mark.parametrize("fraction,full", [(0.0, False), (0.75, False), (1.0, False), (0.75, True)])
-def test_echo_npu_common_state_and_outputs(shape, fraction, full):
+def test_echo_npu_common_state_and_outputs(shape, fraction, full, variant):
     import sparse_kv_plan_op as op
     assert hasattr(torch.ops.sparse_kv_plan_op, "echo_lru"), "请重新构建扩展"
     case = make_peer_common_case(rows=shape[0], topk=shape[1], capacity=shape[2], max_token=shape[3],
@@ -173,7 +174,8 @@ def test_echo_npu_common_state_and_outputs(shape, fraction, full):
         getattr(state, key).copy_(_to_npu(value))
     reset = (case["req_ids"] != case["last_req_ids"]).astype(np.uint8)
     expected = golden_echo_lru(case["topk_indices"], case["stable_prefix_lens"], reset, initial, spec_enabled=False)
-    op.echo_lru(pos=_to_npu(case["topk_indices"]), stable_prefix_lens=_to_npu(case["stable_prefix_lens"]),
+    operator = op.echo_lru_skip_sort if variant == "skip_sort" else op.echo_lru
+    operator(pos=_to_npu(case["topk_indices"]), stable_prefix_lens=_to_npu(case["stable_prefix_lens"]),
                 reset_mask=_to_npu(reset), state=state, spec_enabled=False)
     torch.npu.synchronize()
     actual = _actual(state)
@@ -185,14 +187,16 @@ def test_echo_npu_common_state_and_outputs(shape, fraction, full):
 
 
 @requires_npu
-def test_echo_npu_continues_own_state():
+@pytest.mark.parametrize("variant", ["original", "skip_sort"])
+def test_echo_npu_continues_own_state(variant):
     import sparse_kv_plan_op as op
     state = op.EchoLruState.create(1, 4, 4, 16, "npu")
     expected = empty_echo_state(1, 4, 4, 16)
+    operator = op.echo_lru_skip_sort if variant == "skip_sort" else op.echo_lru
     for pos, spl, reset in _sequence():
         prefix, mask = np.array([spl], np.int32), np.array([reset], np.uint8)
         expected = golden_echo_lru(pos, prefix, mask, expected)
-        op.echo_lru(pos=_to_npu(pos), stable_prefix_lens=_to_npu(prefix), reset_mask=_to_npu(mask), state=state)
+        operator(pos=_to_npu(pos), stable_prefix_lens=_to_npu(prefix), reset_mask=_to_npu(mask), state=state)
         torch.npu.synchronize()
         actual = _actual(state)
         for key in actual:
@@ -202,11 +206,52 @@ def test_echo_npu_continues_own_state():
 
 
 @requires_npu
-def test_echo_npu_rejects_short_workspace():
+@pytest.mark.parametrize("variant", ["original", "skip_sort"])
+def test_echo_npu_rejects_short_workspace(variant):
     import sparse_kv_plan_op as op
     state = op.EchoLruState.create(1, 2, 4, 16, "npu")
     state = state._replace(workspace=torch.empty(1, dtype=torch.int32, device="npu"))
+    operator = op.echo_lru_skip_sort if variant == "skip_sort" else op.echo_lru
     with pytest.raises(RuntimeError, match="workspace"):
-        op.echo_lru(pos=_to_npu(np.array([[1, 2]], np.int32)),
+        operator(pos=_to_npu(np.array([[1, 2]], np.int32)),
                     stable_prefix_lens=_to_npu(np.array([16], np.int32)),
                     reset_mask=_to_npu(np.array([1], np.uint8)), state=state)
+
+
+@requires_npu
+def test_echo_npu_skip_sort_mixed_rows_matches_original():
+    """同核多行交替 skip/sort，包含 spec 释放、reset 及脏 workspace。"""
+    import sparse_kv_plan_op as op
+    rows, topk, capacity, max_token = 8, 4, 8, 64
+    settings = [(1.0, False), (0.5, True), (0.0, False), (1.0, True),
+                (0.5, True), (0.0, True), (0.75, False), (0.25, False)]
+    cases = [make_peer_common_case(rows=1, topk=topk, capacity=capacity, max_token=max_token,
+                                  resident_fraction=fraction, full_cache=full, seed=100+i)
+             for i, (fraction, full) in enumerate(settings)]
+    initial_rows = [echo_from_common(case) for case in cases]
+    initial = {key: np.concatenate([state[key] for state in initial_rows]) for key in STATE_KEYS}
+    pos = np.concatenate([case["topk_indices"] for case in cases])
+    prefix = np.full(rows, max_token, np.int32)
+    prefix[4] = 32
+    mask = np.zeros(rows, np.uint8)
+    mask[2] = 1
+    expected = golden_echo_lru(pos, prefix, mask, initial)
+    cores = min(2, torch.ops.sparse_kv_plan_op.echo_lru_core_count())
+    inputs = [_to_npu(value) for value in (pos, prefix, mask)]
+    results = []
+    for operator in (op.echo_lru, op.echo_lru_skip_sort):
+        state = op.EchoLruState.create(rows, topk, capacity, max_token, "npu", available_cores=cores)
+        for key, value in initial.items():
+            getattr(state, key).copy_(_to_npu(value))
+        state.workspace.fill_(I32_MAX)
+        for key in OUTPUT_KEYS:
+            getattr(state, key).fill_(17)
+        operator(pos=inputs[0], stable_prefix_lens=inputs[1], reset_mask=inputs[2], state=state)
+        torch.npu.synchronize()
+        actual = _actual(state)
+        for key in actual:
+            np.testing.assert_array_equal(actual[key], expected[key], err_msg=key)
+        assert_echo_invariants(pos, actual)
+        results.append(actual)
+    for key in expected:
+        np.testing.assert_array_equal(results[0][key], results[1][key], err_msg=f"A/B:{key}")

@@ -16,7 +16,7 @@ from echo_lru_cases import (make_peer_common_case, echo_from_common, assert_echo
 from golden import golden_sparse_kv_plan
 
 
-def setup_echo(torch, op, case):
+def setup_echo(torch, op, case, *, skip_zero_free_size=False):
     rows, topk = case["topk_indices"].shape
     state = op.EchoLruState.create(rows, topk, case["capacity"], case["max_token"], "npu")
     initial_cpu = echo_from_common(case)
@@ -32,8 +32,10 @@ def setup_echo(torch, op, case):
             getattr(state, key).copy_(value)
         torch.npu.synchronize()
 
+    operator = op.echo_lru_skip_sort if skip_zero_free_size else op.echo_lru
+
     def call():
-        op.echo_lru(pos=pos, stable_prefix_lens=spl, reset_mask=reset_mask,
+        operator(pos=pos, stable_prefix_lens=spl, reset_mask=reset_mask,
                     state=state, spec_enabled=spec)
 
     reset(state)
@@ -62,6 +64,8 @@ def main():
     parser.add_argument("--repeat", type=int, default=50)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--include-echo-skip-sort", action="store_true",
+                        help="增加第四路 Echo 无需淘汰时跳过排序的实验版")
     args = parser.parse_args()
     if args.warmup < 0 or args.repeat <= 0:
         parser.error("warmup must be >= 0 and repeat > 0")
@@ -77,6 +81,8 @@ def main():
     for name in ("old_lru_compact", "sparse_kv_plan", "echo_lru"):
         if not hasattr(torch.ops.sparse_kv_plan_op, name):
             parser.error(f"扩展缺少 {name}，请重新构建")
+    if args.include_echo_skip_sort and not hasattr(torch.ops.sparse_kv_plan_op, "echo_lru_skip_sort"):
+        parser.error("扩展缺少 echo_lru_skip_sort，请重新构建实验分支")
     result = dict(device=torch.npu.get_device_name(args.device), device_index=args.device,
                   torch=torch.__version__, torch_npu=torch_npu.__version__,
                   shape=dict(rows=args.rows, topk=args.topk, capacity=args.capacity, max_token=args.max_token),
@@ -93,13 +99,16 @@ def main():
         _check_correctness(torch, base, reset, case)
         runners = {name: (state, call, reset) for name, (state, call) in base.items()}
         runners["peer_echo"] = setup_echo(torch, op, case)
+        if args.include_echo_skip_sort:
+            runners["peer_echo_skip_sort"] = setup_echo(torch, op, case, skip_zero_free_size=True)
         for _ in range(args.warmup):
             for state, call, restore in runners.values():
                 _measure(torch, state, call, restore)
         samples = {name: dict(device=[], host=[]) for name in runners}
         names = list(runners)
         for iteration in range(args.repeat):
-            order = names[iteration % 3:] + names[:iteration % 3]
+            offset = iteration % len(names)
+            order = names[offset:] + names[:offset]
             if iteration % 2:
                 order = order[::-1]
             for name in order:
@@ -114,6 +123,11 @@ def main():
                                               for value in state if torch.is_tensor(value))
             stats[name]["raw_samples_us"] = samples[name]
         stats["peer_vs_new_event_ratio"] = stats["peer_echo"]["device"]["p50_us"] / stats["new_simt"]["device"]["p50_us"]
+        if args.include_echo_skip_sort:
+            original = stats["peer_echo"]["device"]["p50_us"]
+            skipped = stats["peer_echo_skip_sort"]["device"]["p50_us"]
+            stats["echo_sort_skip_event_speedup"] = original / skipped
+            stats["echo_sort_skip_event_saved_us"] = original - skipped
         result["scenarios"][label] = stats
         print(label + ": " + ", ".join(f"{name} {stats[name]['device']['p50_us']:.2f} us" for name in names))
     if args.json:

@@ -27,3 +27,6 @@ cmake_install.cmake
 .idea/
 *.swp
 .DS_Store
+
+# 本地性能采样和 profiler 导出
+results/

@@ -179,3 +179,7 @@ kernel 计算逻辑源自 MemFabric_Hybrid(Mulan PSL v2),保留原始版权声�
 ## 同事 Echo 纯 SIMT 三方对比
 
 新增 `EchoLruState` / `echo_lru` 和 `bench/compare_three.py`。接口契约、算法差异、正确性验证和生产尺寸命令见 [Echo 算子接入与性能对比](docs/Echo算子接入与性能对比.md)。
+
+### Echo 零淘汰排序实验
+
+实验分支保留原版 `echo_lru`，另提供 `echo_lru_skip_sort`：无需淘汰历史槽的行跳过排序。`compare_three.py --include-echo-skip-sort` 加入第四路公共接口延迟对比，`bench/profile_echo_sort.py` 单独采集两版 kernel duration。构建、回归、同尺寸采集及结果解释见 [Echo 跳过零淘汰排序实验](docs/Echo跳过零淘汰排序实验.md)。

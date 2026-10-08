@@ -84,6 +84,7 @@ void EchoMeta(const at::Tensor& pos, const at::Tensor& spl, const at::Tensor& re
   Check(pos, spl, resetMask, htd, dth, pri, freeSlots, avail, fifo, curSlots, missHostPos, missAllocFlat, missMask, workspace, blocks, specEnabled, false);
 }
 
+template <bool SkipZeroFreeSize>
 void EchoNpu(const at::Tensor& pos, const at::Tensor& spl, const at::Tensor& resetMask, const at::Tensor& htd, const at::Tensor& dth, const at::Tensor& pri, const at::Tensor& freeSlots, const at::Tensor& avail, const at::Tensor& fifo, const at::Tensor& curSlots, const at::Tensor& missHostPos, const at::Tensor& missAllocFlat, const at::Tensor& missMask, const at::Tensor& workspace, int64_t blocks, bool specEnabled) {
   const c10::OptionalDeviceGuard guard(pos.device());
   const auto tiling = Check(pos, spl, resetMask, htd, dth, pri, freeSlots, avail, fifo, curSlots, missHostPos, missAllocFlat, missMask, workspace, blocks, specEnabled, true);
@@ -95,7 +96,8 @@ void EchoNpu(const at::Tensor& pos, const at::Tensor& spl, const at::Tensor& res
   auto stream = c10_npu::getCurrentNPUStream().stream(false);
   // Own tensors and tiling until an asynchronously scheduled callback completes.
   auto launch = [=]() -> int {
-    launch_echo_lru(htd.data_ptr<int32_t>(), dth.data_ptr<int32_t>(), pri.data_ptr<int32_t>(),
+    const auto launcher = SkipZeroFreeSize ? launch_echo_lru_skip_sort : launch_echo_lru;
+    launcher(htd.data_ptr<int32_t>(), dth.data_ptr<int32_t>(), pri.data_ptr<int32_t>(),
                     freeSlots.data_ptr<int32_t>(), avail.data_ptr<int32_t>(), fifo.data_ptr<int32_t>(),
                     pos.data_ptr<int32_t>(), spl.data_ptr<int32_t>(), resetMask.data_ptr<uint8_t>(),
                     curSlots.data_ptr<int32_t>(), missHostPos.data_ptr<int32_t>(),
@@ -103,7 +105,7 @@ void EchoNpu(const at::Tensor& pos, const at::Tensor& spl, const at::Tensor& res
                     workspace.data_ptr(), tilingDev.data_ptr(), blocks, reinterpret_cast<void*>(stream));
     return 0;
   };
-  at_npu::native::OpCommand::RunOpApi("EchoLru", launch);
+  at_npu::native::OpCommand::RunOpApi(SkipZeroFreeSize ? "EchoLruSkipSort" : "EchoLru", launch);
 }
 }  // namespace
 
@@ -114,6 +116,17 @@ TORCH_LIBRARY_FRAGMENT(sparse_kv_plan_op, m) {
         "Tensor(f!) fifo, Tensor(g!) current_slots, Tensor(h!) miss_host_pos, "
         "Tensor(i!) miss_alloc_flat, Tensor(j!) miss_mask, Tensor(k!) workspace, "
         "int blocks, bool spec_enabled) -> ()");
+  m.def("echo_lru_skip_sort(Tensor pos, Tensor spl, Tensor reset_mask, Tensor(a!) htd, "
+        "Tensor(b!) dth, Tensor(c!) pri, Tensor(d!) free_slots, Tensor(e!) avail, "
+        "Tensor(f!) fifo, Tensor(g!) current_slots, Tensor(h!) miss_host_pos, "
+        "Tensor(i!) miss_alloc_flat, Tensor(j!) miss_mask, Tensor(k!) workspace, "
+        "int blocks, bool spec_enabled) -> ()");
 }
-TORCH_LIBRARY_IMPL(sparse_kv_plan_op, Meta, m) { m.impl("echo_lru", EchoMeta); }
-TORCH_LIBRARY_IMPL(sparse_kv_plan_op, PrivateUse1, m) { m.impl("echo_lru", EchoNpu); }
+TORCH_LIBRARY_IMPL(sparse_kv_plan_op, Meta, m) {
+  m.impl("echo_lru", EchoMeta);
+  m.impl("echo_lru_skip_sort", EchoMeta);
+}
+TORCH_LIBRARY_IMPL(sparse_kv_plan_op, PrivateUse1, m) {
+  m.impl("echo_lru", EchoNpu<false>);
+  m.impl("echo_lru_skip_sort", EchoNpu<true>);
+}

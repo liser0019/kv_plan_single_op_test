@@ -9,6 +9,12 @@ void launch_echo_lru(int32_t* htd, int32_t* dth, int32_t* pri, int32_t* freeSlot
                      int32_t* missAllocFlat, uint8_t* missMask, void* workspace,
                      void* tiling, uint32_t blockNum, void* stream);
 
+void launch_echo_lru_skip_sort(int32_t* htd, int32_t* dth, int32_t* pri, int32_t* freeSlots,
+                     int32_t* avail, int32_t* fifo, int32_t* pos, int32_t* spl,
+                     uint8_t* resetMask, int32_t* curSlots, int32_t* missHostPos,
+                     int32_t* missAllocFlat, uint8_t* missMask, void* workspace,
+                     void* tiling, uint32_t blockNum, void* stream);
+
 inline uint64_t EchoWorkspaceElements(uint32_t rows, uint32_t topk,
                                        uint32_t capacity, uint32_t blocks) {
   uint64_t npad = 1;

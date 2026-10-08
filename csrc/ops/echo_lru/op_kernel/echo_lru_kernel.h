@@ -896,6 +896,7 @@ public:
     // [GM radix] argtopk 缓冲在 GM (ping-pong A/B + count), Process 不再接收
     //   UB 指针. Path A: 行间零依赖, 步间用块内 SyncGrid() (syncthreads+dcci), 不传 grid
     //   (跨核 grid.sync 在 echo_lru 内 trap, 见 SyncGrid 注释, 暂停攻关).
+    template <bool SkipZeroFreeSize = false>
     __aicore__ inline void Process() {
         uint32_t R = tiling_.numTokens;
         uint32_t B = tiling_.topkBufferB;
@@ -950,7 +951,7 @@ public:
         // ---- Step 3: free ----
         OpFreeSize(R, rowsPerCore, tailRows, numMissesGm_, availGm_, freeSizeGm_);
         SyncGrid();
-        ArgtopkAllRows();   // [Step2] GM count 并行 histogram (UB atomic 非真原子, 已回 GM)
+        ArgtopkAllRows<SkipZeroFreeSize>();   // [Step2] GM count 并行 histogram (UB atomic 非真原子, 已回 GM)
         SyncGrid();
         OpFreeRelease(R, topkDim, B, maxModelLenP1, rowsPerCore, tailRows, freeIdxGm_, freeSizeGm_, priGm_, dthGm_, htdGm_);
         SyncGrid();
@@ -1011,6 +1012,7 @@ private:
     // [UB 攻关 2026-09-30] ping-pong key/slot 搬顶层单大 __ubuf__ 数组 (每核自己的 UB, 无 myBlock
     //   偏移); count/scatLocal/debug 仍留 GM (per-thread 切片, 需 myBlock 偏移每核独占).
     //   行串行处理, 每核复用自己的 UB key/slot 段 + GM count 段.
+    template <bool SkipZeroFreeSize>
     __aicore__ inline void ArgtopkAllRows() {
         uint32_t myBlock = blockIdx.x;
         uint32_t blockNum = gridDim.x;
@@ -1036,6 +1038,13 @@ private:
             if (row >= R) break;
             int32_t freeSize = freeSizeGm_[row];   // 取前 freeSize 个 (不再固定 kEff)
             bool dbg = (tiling_.argtopkDebugRow == row);
+            if constexpr (SkipZeroFreeSize) {
+                // OpFreeSize + SyncGrid published one immutable freeSize per row.
+                // All threads in this block take the same branch; no thread exits
+                // alone from OpArgtopkRow's barriers. Keep debug dumps available.
+                if (freeSize == 0 && !dbg) continue;
+                // freeIdx need not be cleared: release/push read it only for j<freeSize.
+            }
             OpArgtopkRow(B, Npad, topkDim, priGm_, row, freeIdxGm_, freeSize,
                          keyPriA, keySlotA, keyPriB, keySlotB, count, scatLcl,
                          dbg ? dbgCount : nullptr,
@@ -1126,6 +1135,45 @@ extern "C" __global__ __launch_bounds__(ECHO_LRU_THREAD_NUM) void echo_lru_kerne
     // Path A: 不使用 grid_group (跨核 grid.sync 在 echo_lru 内 trap, 见 SyncGrid 注释, 暂停攻关).
     //   行间零依赖, 步间块内 SyncGrid() (syncthreads+dcci) 即可.
     op.Process();
+}
+
+// Experiment entry: identical state/tiling/UB; skip only zero-eviction rows.
+extern "C" __global__ __launch_bounds__(ECHO_LRU_THREAD_NUM) void echo_lru_skip_sort_kernel(
+    int32_t* htd, int32_t* dth, int32_t* pri, int32_t* free,
+    int32_t* avail, int32_t* fifo, int32_t* pos, int32_t* spl,
+    uint8_t* resetMask, int32_t* curSlots,
+    int32_t* missHostPos, int32_t* missAllocFlat, uint8_t* missMask,
+    void* workspace, EchoLruTiling* tilingBuf) {
+    EchoLruTiling tiling;
+    tiling.blockNum       = tilingBuf->blockNum;
+    tiling.rowsPerCore    = tilingBuf->rowsPerCore;
+    tiling.tailRows       = tilingBuf->tailRows;
+    tiling.numTokens      = tilingBuf->numTokens;
+    tiling.topkBufferB    = tilingBuf->topkBufferB;
+    tiling.freeStackSize  = tilingBuf->freeStackSize;
+    tiling.maxModelLenP1  = tilingBuf->maxModelLenP1;
+    tiling.topkDim        = tilingBuf->topkDim;
+    tiling.effTopk        = tilingBuf->effTopk;
+    tiling.blockSize      = tilingBuf->blockSize;
+    tiling.blockTableCols = tilingBuf->blockTableCols;
+    tiling.kDim           = tilingBuf->kDim;
+    tiling.vDim           = tilingBuf->vDim;
+    tiling.kvHeadNum      = tilingBuf->kvHeadNum;
+    tiling.specEnabled    = tilingBuf->specEnabled;
+    tiling.argtopkDebugRow = tilingBuf->argtopkDebugRow;
+    // [UB 攻关 2026-09-30] argtopk ping-pong key/slot 搬顶层单大 __ubuf__ 数组 (手动分段).
+    //   probe_ub_size 实测: 单 __ubuf__ 数组可到 192KB (256KB 才 trap); 4 个独立 __ubuf__ 数组会
+    //   别名互相覆盖 (读 A 得 D). 故用单大数组 argtopkUb[4*NpadMax] 分 4 段 (偏移 0/Npad/2Npad/3Npad)
+    //   作 keyPriA/SlotA/keyPriB/SlotB. count/scatLocal/debug 仍留 GM (per-thread 切片, 跨核需 GM).
+    //   每核 block 内共享自己的 UB (无需 myBlock 偏移). NpadMax=8192 (B_MAX=4096→next_pow2(4097)),
+    //   4*8192=32768 元素=128KB (probe 实测 32768 PASS). ARGTOPK_UB_ELEMS 见 tiling.h.
+    __ubuf__ int32_t argtopkUb[ARGTOPK_UB_ELEMS];
+    EchoLruKernel op;
+    op.Init(htd, dth, pri, free, avail, fifo, pos, spl, resetMask, curSlots,
+            missHostPos, missAllocFlat, missMask, workspace, tiling, argtopkUb);
+    // Path A: 不使用 grid_group (跨核 grid.sync 在 echo_lru 内 trap, 见 SyncGrid 注释, 暂停攻关).
+    //   行间零依赖, 步间块内 SyncGrid() (syncthreads+dcci) 即可.
+    op.Process<true>();
 }
 
 }  // namespace ascend_kernel

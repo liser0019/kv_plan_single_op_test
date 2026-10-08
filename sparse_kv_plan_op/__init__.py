@@ -40,6 +40,7 @@ __all__ = [
     "make_compact_workspace",
     "EchoLruState",
     "echo_lru",
+    "echo_lru_skip_sort",
     "echo_partition",
     "echo_workspace_elements",
 ]
@@ -251,6 +252,16 @@ def echo_lru(*, pos: torch.Tensor, stable_prefix_lens: torch.Tensor,
     Echo 不实现 SIMT Plan 的 visible_seq_lens/block_table/去重检查。
     """
     return torch.ops.sparse_kv_plan_op.echo_lru(
+        pos, stable_prefix_lens, reset_mask, state.htd, state.dth, state.pri,
+        state.free_slots, state.avail, state.fifo, state.current_slots,
+        state.miss_host_pos, state.miss_alloc_flat, state.miss_mask, state.workspace,
+        state.blocks, spec_enabled)
+
+
+def echo_lru_skip_sort(*, pos: torch.Tensor, stable_prefix_lens: torch.Tensor,
+             reset_mask: torch.Tensor, state: EchoLruState, spec_enabled: bool = True) -> None:
+    """Echo 实验版：freeSize=0 时跳过排序，输入与输出契约同 echo_lru。"""
+    return torch.ops.sparse_kv_plan_op.echo_lru_skip_sort(
         pos, stable_prefix_lens, reset_mask, state.htd, state.dth, state.pri,
         state.free_slots, state.avail, state.fifo, state.current_slots,
         state.miss_host_pos, state.miss_alloc_flat, state.miss_mask, state.workspace,
