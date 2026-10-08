@@ -38,6 +38,10 @@ __all__ = [
     "plan_hash_capacity",
     "plan_workspace_elements",
     "make_compact_workspace",
+    "EchoLruState",
+    "echo_lru",
+    "echo_partition",
+    "echo_workspace_elements",
 ]
 
 _PLAN_ROW_UB_LIMIT_BYTES = 112 * 1024
@@ -186,3 +190,68 @@ def old_lru_compact(
         state.miss_slots, state.token_mark, state.token_pos,
         state.epochs, max_token,
     )
+
+
+from .echo_layout import I32_MAX, echo_partition, echo_workspace_elements
+
+
+class EchoLruState(NamedTuple):
+    """同事纯 SIMT Echo 的状态。槽位 1..capacity；token 0 对应保留槽 0。"""
+
+    htd: torch.Tensor
+    dth: torch.Tensor
+    pri: torch.Tensor
+    free_slots: torch.Tensor
+    avail: torch.Tensor
+    fifo: torch.Tensor
+    current_slots: torch.Tensor
+    miss_host_pos: torch.Tensor
+    miss_alloc_flat: torch.Tensor
+    miss_mask: torch.Tensor
+    workspace: torch.Tensor
+    blocks: int
+
+    @classmethod
+    def create(cls, rows: int, topk: int, capacity: int, max_token: int, device,
+               available_cores=None) -> "EchoLruState":
+        if not (1 < max_token <= I32_MAX and rows > 0 and
+                rows * max_token <= I32_MAX and
+                rows * (capacity + min(topk, capacity)) <= I32_MAX):
+            raise ValueError("invalid max_token or 32-bit index overflow")
+        if available_cores is None:
+            with torch.npu.device(device):
+                available_cores = torch.ops.sparse_kv_plan_op.echo_lru_core_count()
+        blocks, _, _ = echo_partition(rows, available_cores)
+        elements = echo_workspace_elements(rows, topk, capacity, blocks)
+        htd = torch.full((rows, max_token), I32_MAX, dtype=torch.int32, device=device)
+        htd[:, 0] = 0
+        pri = torch.full((rows, capacity + 1), -1, dtype=torch.int32, device=device)
+        pri[:, 0] = I32_MAX
+        free = torch.zeros((rows, capacity + min(topk, capacity)), dtype=torch.int32, device=device)
+        free[:, :capacity] = torch.arange(capacity, 0, -1, dtype=torch.int32, device=device)
+        return cls(
+            htd, torch.full_like(pri, I32_MAX), pri, free,
+            torch.full((rows,), capacity, dtype=torch.int32, device=device),
+            torch.ones(rows, dtype=torch.int32, device=device),
+            torch.zeros((rows, topk), dtype=torch.int32, device=device),
+            torch.zeros((rows, topk), dtype=torch.int32, device=device),
+            torch.zeros((rows, topk), dtype=torch.int32, device=device),
+            torch.zeros((rows, topk), dtype=torch.uint8, device=device),
+            torch.empty(elements, dtype=torch.int32, device=device), blocks)
+
+
+def echo_lru(*, pos: torch.Tensor, stable_prefix_lens: torch.Tensor,
+             reset_mask: torch.Tensor, state: EchoLruState, spec_enabled: bool = True) -> None:
+    """按 Echo 原语义更新状态。
+
+    调用方契约：有效前 min(topk, capacity) 个 token 行内不重复且在
+    [0, max_token) 内；0 是保留 token。spl 在 [0, max_token] 内。
+    持久状态须由 create、合法转换或上一轮 kernel 产生；fifo 不能溢出 int32。
+    spec_enabled=False 仅用于所有 spl==max_token 的调用；默认 True 无需 Host 读回。
+    Echo 不实现 SIMT Plan 的 visible_seq_lens/block_table/去重检查。
+    """
+    return torch.ops.sparse_kv_plan_op.echo_lru(
+        pos, stable_prefix_lens, reset_mask, state.htd, state.dth, state.pri,
+        state.free_slots, state.avail, state.fifo, state.current_slots,
+        state.miss_host_pos, state.miss_alloc_flat, state.miss_mask, state.workspace,
+        state.blocks, spec_enabled)

@@ -59,3 +59,8 @@ set(CANN_LIB_DIR "${ASCEND_CANN_PACKAGE_HOME}/lib64")
 if(NOT EXISTS "${CANN_LIB_DIR}")
     set(CANN_LIB_DIR "${ASCEND_CANN_PACKAGE_HOME}/lib")
 endif()
+
+# Pure SIMT headers in newer CANN distributions.
+if(EXISTS "${ASCEND_CANN_PACKAGE_HOME}/asc/include")
+    list(APPEND CANN_INCLUDE_DIRS "${ASCEND_CANN_PACKAGE_HOME}/asc/include")
+endif()

@@ -175,3 +175,7 @@ golden/用例生成/MTP 驱动器/锚点用例是纯 CPU 代码,**已在本机�
 
 kernel 计算逻辑源自 MemFabric_Hybrid(Mulan PSL v2),保留原始版权声明;
 工程骨架与测试代码 Apache-2.0,与 vllm-ascend 仓一致。
+
+## 同事 Echo 纯 SIMT 三方对比
+
+新增 `EchoLruState` / `echo_lru` 和 `bench/compare_three.py`。接口契约、算法差异、正确性验证和生产尺寸命令见 [Echo 算子接入与性能对比](docs/Echo算子接入与性能对比.md)。

@@ -53,6 +53,7 @@ include(cmake/func.cmake)
 add_subdirectory(csrc/ops)
 
 get_property(ALL_KERNEL_SRCS GLOBAL PROPERTY DIRECT_LAUNCH_KERNEL_SRCS)
+get_property(PURE_SIMT_SRCS GLOBAL PROPERTY DIRECT_LAUNCH_PURE_SIMT_SRCS)
 get_property(ALL_PLUGIN_SRCS GLOBAL PROPERTY DIRECT_LAUNCH_PLUGIN_SRCS)
 get_property(OP_INCLUDE_DIRS GLOBAL PROPERTY DIRECT_LAUNCH_INCLUDE_DIRS)
 
@@ -85,10 +86,14 @@ foreach(_kernel_src IN LISTS ALL_KERNEL_SRCS)
     string(SHA256 _kernel_hash "${_kernel_src}")
     string(SUBSTRING "${_kernel_hash}" 0 12 _kernel_id)
     set(_kernel_obj "${CMAKE_CURRENT_BINARY_DIR}/kernel_${_kernel_id}.o")
+    set(_kernel_mode_flags ${KERNEL_SIMT_FLAGS})
+    if(_kernel_src IN_LIST PURE_SIMT_SRCS)
+        set(_kernel_mode_flags --enable-simt -Wno-deprecated-declarations)
+    endif()
     add_custom_command(
         OUTPUT "${_kernel_obj}"
         COMMAND "${BISHENG_CXX}" --npu-arch=${BISHENG_NPU_ARCH} -xasc
-                -std=c++17 -fPIC ${KERNEL_OPT_FLAGS} ${KERNEL_SIMT_FLAGS}
+                -std=c++17 -fPIC ${KERNEL_OPT_FLAGS} ${_kernel_mode_flags}
                 ${KERNEL_INCLUDE_ARGS} -c "${_kernel_src}" -o "${_kernel_obj}"
         DEPENDS "${_kernel_src}" ${KERNEL_HEADERS}
         COMMENT "bisheng 编译 ${_kernel_src}"
