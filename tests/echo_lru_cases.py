@@ -44,7 +44,8 @@ def echo_from_common(case):
         out["htd"][row, resident[occupied]] = occupied + 1
         rank = np.empty(capacity, np.int32)
         rank[case["lru_slots"][row]] = np.arange(capacity, dtype=np.int32)
-        out["pri"][row, occupied + 1] = capacity - rank[occupied]
+        # lru_slots 按最旧→最新排列；Echo 时间戳越小越先淘汰。
+        out["pri"][row, occupied + 1] = rank[occupied] + 1
         empty = np.flatnonzero(resident < 0) + 1
         out["free_slots"][row].fill(0)
         out["free_slots"][row, :len(empty)] = empty[::-1]
@@ -81,3 +82,19 @@ def assert_echo_invariants(pos, state):
                                       row * capacity + state["current_slots"][row, mask])
         assert np.all(state["current_slots"][row, eff:] == 0)
         assert np.all(state["miss_mask"][row, eff:] == 0)
+
+
+def assert_common_eviction_tokens(case, echo_dth, common_slot_to_token):
+    """共同单步输入下核对被淘汰的历史 token 集合，不要求分配槽号相同。
+
+    用于显式保留相同初始历史的转换场景；不适用于两种策略多轮演化后的状态。
+    """
+    for row, before in enumerate(case["slot_to_token"]):
+        resident = before[before >= 0]
+        echo_after = echo_dth[row, 1:]
+        echo_after = echo_after[echo_after != I32_MAX]
+        common_after = common_slot_to_token[row]
+        common_after = common_after[common_after >= 0]
+        np.testing.assert_array_equal(
+            np.setdiff1d(resident, echo_after), np.setdiff1d(resident, common_after),
+            err_msg=f"row {row}: historical eviction tokens differ")

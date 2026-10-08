@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "sparse_kv_plan_op"))
 from echo_layout import echo_partition, echo_workspace_elements
-from echo_lru_cases import make_peer_common_case, echo_from_common, assert_echo_invariants
+from echo_lru_cases import (make_peer_common_case, echo_from_common, assert_echo_invariants,
+                            assert_common_eviction_tokens)
 from golden_echo_lru import golden_echo_lru, empty_echo_state, STATE_KEYS, OUTPUT_KEYS, I32_MAX
 from golden import golden_sparse_kv_plan
 from golden_old_lru import golden_old_lru
@@ -100,7 +101,7 @@ def test_echo_golden_rejects_unsupported_inputs(pos):
 
 @pytest.mark.parametrize("shape", [(2, 8, 16, 128), (32, 2048, 4096, 256*1024)])
 @pytest.mark.parametrize("fraction,full", [(0.0, False), (0.75, False), (1.0, False), (0.75, True)])
-def test_echo_common_domain_matches_miss_counts(shape, fraction, full):
+def test_echo_common_domain_matches_misses_and_evictions(shape, fraction, full):
     case = make_peer_common_case(rows=shape[0], topk=shape[1], capacity=shape[2],
                                  max_token=shape[3], resident_fraction=fraction, full_cache=full)
     echo = golden_echo_lru(case["topk_indices"], case["stable_prefix_lens"],
@@ -109,9 +110,40 @@ def test_echo_common_domain_matches_miss_counts(shape, fraction, full):
     old = golden_old_lru(case)
     np.testing.assert_array_equal(echo["miss_mask"].sum(axis=1), new["miss_count"])
     np.testing.assert_array_equal(old["miss_count"], new["miss_count"])
+    assert_common_eviction_tokens(case, echo["dth"], new["slot_to_token"])
+    assert_common_eviction_tokens(case, echo["dth"], old["slot_to_token"])
     assert_echo_invariants(case["topk_indices"], echo)
     for row in range(shape[0]):
         np.testing.assert_array_equal(new["slot_to_token"][row, new["current_slots"][row]], case["topk_indices"][row])
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_echo_conversion_preserves_shuffled_history_and_evictions(seed):
+    case = make_peer_common_case(rows=2, topk=4, capacity=8, max_token=64,
+                                 resident_fraction=0.5, full_cache=True, seed=seed)
+    rng = np.random.default_rng(seed + 100)
+    case["lru_slots"] = np.stack([rng.permutation(8) for _ in range(2)]).astype(np.int32)
+    initial = echo_from_common(case)
+    for row, lru in enumerate(case["lru_slots"]):
+        # 不从转换公式构造期望，直接检查淘汰键的排序能还原输入历史。
+        echo_order = np.argsort(initial["pri"][row, 1:], kind="stable")
+        np.testing.assert_array_equal(echo_order, lru)
+        assert initial["fifo"][row] > initial["pri"][row, 1:].max()
+    out = golden_echo_lru(case["topk_indices"], case["stable_prefix_lens"],
+                          np.zeros(2, np.uint8), initial, spec_enabled=False)
+    new, old = golden_sparse_kv_plan(case), golden_old_lru(case)
+    for row, lru in enumerate(case["lru_slots"]):
+        before = case["slot_to_token"][row]
+        queries = set(case["topk_indices"][row].tolist())
+        residents_before = set(before.tolist())
+        misses = sum(int(token) not in residents_before for token in queries)
+        oldest_unqueried = [int(before[slot]) for slot in lru if int(before[slot]) not in queries]
+        expected_evicted = np.sort(oldest_unqueried[:misses])
+        assert misses == 2
+        for residents in (out["dth"][row, 1:], new["slot_to_token"][row], old["slot_to_token"][row]):
+            np.testing.assert_array_equal(np.setdiff1d(before, residents), expected_evicted)
+    assert_common_eviction_tokens(case, out["dth"], new["slot_to_token"])
+    assert_echo_invariants(case["topk_indices"], out)
 
 
 def _to_npu(value):
@@ -130,6 +162,9 @@ def test_echo_npu_common_state_and_outputs(shape, fraction, full):
     assert hasattr(torch.ops.sparse_kv_plan_op, "echo_lru"), "请重新构建扩展"
     case = make_peer_common_case(rows=shape[0], topk=shape[1], capacity=shape[2], max_token=shape[3],
                                  resident_fraction=fraction, full_cache=full)
+    if full:
+        rng = np.random.default_rng(123)
+        case["lru_slots"] = np.stack([rng.permutation(shape[2]) for _ in range(shape[0])]).astype(np.int32)
     # 至多六核，覆盖原 Host 分行公式容易下溢的场景及一核多行。
     cores = min(6, torch.ops.sparse_kv_plan_op.echo_lru_core_count())
     state = op.EchoLruState.create(*shape, device="npu", available_cores=cores)
@@ -145,6 +180,8 @@ def test_echo_npu_common_state_and_outputs(shape, fraction, full):
     for key in actual:
         np.testing.assert_array_equal(actual[key], expected[key], err_msg=key)
     assert_echo_invariants(case["topk_indices"], actual)
+    assert_common_eviction_tokens(case, actual["dth"], golden_sparse_kv_plan(case)["slot_to_token"])
+    assert_common_eviction_tokens(case, actual["dth"], golden_old_lru(case)["slot_to_token"])
 
 
 @requires_npu

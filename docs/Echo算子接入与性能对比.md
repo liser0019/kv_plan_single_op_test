@@ -14,6 +14,7 @@ Echo 以 1024 线程/核启动，四参数调用 `<<<blocks,1024,0,stream>>>`，
 
 ## 2. 接入层修正
 
+- **历史 LRU 转换**：原 `lru_slots` 从最旧到最新；使用 `pri=rank+1` 转换，最旧槽获得最小时间戳。`fifo=capacity+1` 保证本轮新时间戳大于所有历史值。此前 `capacity-rank` 会反转历史顺序，因此 `2f0a2db` 的满缓存对比应在修正后重测。
 - **分行**：先算 chunk=ceil(rows/min(rows,cores))，再算实际 blocks=ceil(rows/chunk)。尾块始终有 1..chunk 行。原 Host 在 rows=32、cores=24 时尾行数会下溢。
 - **调试区容量**：B=4096 时，next_pow2(B+1)=8192。接入副本的调试 key 段上限从 4096 改成 8192，即使当前关闭 dump，也保证启用调试后不越界；Host 分配与内核偏移同源。
 - **依赖**：移除没有使用的 cooperative_groups 头，避免额外要求 CANN 9.2 的该头文件。
@@ -38,22 +39,48 @@ Echo 以 1024 线程/核启动，四参数调用 `<<<blocks,1024,0,stream>>>`，
 
 当前两核使用精确顺序 LRU；Echo 在同一轮为所有 hit 赋同一个时间戳，为所有 miss 赋下一个相同时间戳，之后平局按槽号处理。空闲栈的分配顺序也不同，因此相同 token 得到不同槽位是可能的；多轮后两种淘汰策略还可能产生不同命中率。
 
-本工程对每个实现检查自己的 golden，全量验证 Echo 的六个持久状态字段和四个输出，并验证双向映射、空闲栈唯一性、miss 地址和最终查询 token。共同单步场景额外核对各实现的 miss 数。连续测试专门续用上一轮 NPU 写出的 Echo 状态，golden 只用于比对，不回灌 NPU。
+本工程对每个实现检查自己的 golden，全量验证 Echo 的六个持久状态字段和四个输出，并验证双向映射、空闲栈唯一性、miss 地址和最终查询 token。共同单步场景额外核对各实现的 miss 数和历史淘汰 token 集合，benchmark 在计时前也执行这个检查。另用 20 组随机乱序 LRU 满缓存输入，按输入历史独立确定最老的未命中 token，验证转换顺序和三版 golden 的淘汰集合；NPU 满缓存测试也使用打乱的 LRU。连续测试专门续用上一轮 NPU 写出的 Echo 状态，golden 只用于比对，不回灌 NPU。
 
 不能把当前三方结果称为完全等价实现的性能差异；新 Plan 的合法性检查和 Echo 的稠密 htd 成本也属于各自原算法。
 
 ## 5. 构建与正确性
 
-在有兼容 CANN、torch_npu 的 Ascend 950 环境中，从仓库根目录执行（示例 device 4）：
+建议在服务器的原仓库中创建独立检出，保留已验证工程的工作区与构建产物：
 
 ```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-bash build.sh --soc=ascend950 --install
-python -m pytest tests/test_echo_lru.py -v -s
-python -m pytest tests/ -v -s
+git fetch origin main
+git worktree add --detach ../kv_plan_echo_verify origin/main
+cd ../kv_plan_echo_verify
+git rev-parse HEAD
 ```
 
-环境配置路径按服务器实际安装调整。检查 Echo NPU 用例是否 PASSED，不能仅凭 CPU 测试通过或 SKIPPED 宣称上板成功。无 NPU 时可运行：
+将 HEAD 与本次修复提交核对后，在匹配的 torch/torch_npu 环境中加载实际安装的 CANN 9.1.0 `set_env.sh`，执行：
+
+```bash
+bash build.sh --soc=ascend950
+```
+
+显式选择 NPU 4 跑 Echo 专项，避免普通 pytest 使用默认卡 0：
+
+```bash
+unset ASCEND_LAUNCH_BLOCKING ASCEND_RT_VISIBLE_DEVICES
+ulimit -c 0
+python3 -X faulthandler - <<'PYTEST'
+import torch
+import torch_npu
+import pytest
+
+assert torch.npu.is_available(), "当前环境没有可用 NPU"
+torch.npu.set_device(4)
+print("测试设备:", torch.npu.current_device(), flush=True)
+raise SystemExit(pytest.main(["tests/test_echo_lru.py", "-v", "-x", "-s"]))
+PYTEST
+echo "专项测试退出码: $?"
+```
+
+专项通过后，将该入口中的测试路径替换为 `"tests/"`，仍选择 device 4，运行全套。确认 NPU 用例实际 PASSED、退出码为 0，再进行下一节性能短跑。
+
+无 NPU 时可运行：
 
 ```bash
 CPU_ONLY=1 bash tests/run.sh
@@ -61,8 +88,12 @@ CPU_ONLY=1 bash tests/run.sh
 
 ## 6. 生产尺寸性能对比
 
+先短跑，成功后再正式测量；两次均运行三方脚本 `compare_three.py`：
+
 ```bash
-python bench/compare_three.py \
+python3 -X faulthandler bench/compare_three.py \
+  --device 4 --warmup 2 --repeat 3 --json results/compare_three_smoke.json
+python3 -X faulthandler bench/compare_three.py \
   --device 4 --rows 32 --topk 2048 --capacity 4096 --max-token 262144 \
   --warmup 10 --repeat 50 --json results/compare_three.json
 ```
@@ -80,6 +111,8 @@ python bench/compare_three.py \
 
 **NPU event 是公开算子 API 所覆盖的流区间**，包括该调用的 tiling H2D 和可能的 Host 入队空隙，不等于 profiler 的纯 kernel duration。Host wall 则包括调用、事件和等待完成。三个实现的 launch 包装成本可能不同。微秒级纯内核比较需进一步使用服务器上的 profiler，不能将 event 值直接当作此前的纯 kernel 微秒结果。
 
+四个性能场景均不开启 MTP 回滚；MTP 的后缀失效和状态续用由连续正确性测试另外验证。
+
 JSON 记录设备、torch/torch_npu 版本、shape、seed 和重复次数；对比时应使用同一设备、软件栈和构建配置。
 
 生产尺寸下 Echo htd 单项为 32*262144*4=32 MiB；radix UB 为每核 128 KiB，GM workspace 保留原布局的未使用 ping-pong 占位段。此次不删除占位段或优化排序，保证测量的是同事现有计算流程。
@@ -88,4 +121,6 @@ JSON 记录设备、torch/torch_npu 版本、shape、seed 和重复次数；对�
 
 本机没有 torch_npu、CANN/bisheng 或 NPU，因此只验证 NumPy golden、共同输入、语义锚点、布局计算和 Python 测试；本机没有实际 NPU 延迟结果。应在服务器执行上述构建和测试后再讨论性能优劣。
 
-本次全量 pytest：**67 passed、36 skipped**。另用本机 torch 的 CPU tensor 验证两种尺寸下 `EchoLruState.create` 的六个初始状态与 NumPy 参考相同；使用临时 ACL/torch_npu 声明桩完成 Host 插件的 g++ 语法检查，并核对 C++/Python 生产尺寸 workspace 均为 2695328 个 int32 元素。这些检查均不代表 CANN 编译或 NPU 执行通过。
+初次接入提交 `2f0a2db` 的全量 pytest：**67 passed、36 skipped**。另用本机 torch 的 CPU tensor 验证两种尺寸下 `EchoLruState.create` 的六个初始状态与 NumPy 参考相同；使用临时 ACL/torch_npu 声明桩完成 Host 插件的 g++ 语法检查，并核对 C++/Python 生产尺寸 workspace 均为 2695328 个 int32 元素。这些检查均不代表 CANN 编译或 NPU 执行通过。
+
+历史顺序修复后的本机全量 pytest：**87 passed、36 skipped**；新增 20 组乱序满缓存回归测试。另在内存中复现旧转换，20 组输入全部被新增淘汰集合检查拒绝。Python 编译检查及 `git diff --check` 通过；本次未执行 CANN 编译、NPU 测试或性能计时。

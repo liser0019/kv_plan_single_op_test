@@ -11,7 +11,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 from compare_old_new import _setup, _check_correctness, _measure, _summary, _to_npu
 from golden_echo_lru import golden_echo_lru, STATE_KEYS, OUTPUT_KEYS
-from echo_lru_cases import make_peer_common_case, echo_from_common, assert_echo_invariants
+from echo_lru_cases import (make_peer_common_case, echo_from_common, assert_echo_invariants,
+                            assert_common_eviction_tokens)
+from golden import golden_sparse_kv_plan
 
 
 def setup_echo(torch, op, case):
@@ -43,6 +45,7 @@ def setup_echo(torch, op, case):
     for key in actual:
         np.testing.assert_array_equal(actual[key], expected[key], err_msg=f"peer_echo:{key}")
     assert_echo_invariants(case["topk_indices"], actual)
+    assert_common_eviction_tokens(case, actual["dth"], golden_sparse_kv_plan(case)["slot_to_token"])
     hits = int(topk * case["resident_fraction"])
     np.testing.assert_array_equal(actual["miss_mask"].sum(axis=1), np.full(rows, topk - hits))
     return state, call, reset
